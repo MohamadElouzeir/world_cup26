@@ -479,14 +479,9 @@ function EmptyDayState({ hiddenLate, onShowLate }) {
       <div className="mb-4 rounded-full bg-slate-800 p-4 ring-1 ring-inset ring-slate-700">
         <BedDouble className="h-7 w-7 text-emerald-300" />
       </div>
-      <h2 className="mb-1 text-base font-bold text-slate-100">
-        Nothing before 10 PM today
+      <h2 className="mb-5 text-base font-bold text-slate-100">
+        {hiddenLate > 0 ? 'Nothing before 10 PM' : 'No matches'}
       </h2>
-      <p className="mb-5 max-w-xs text-sm text-slate-400">
-        {hiddenLate > 0
-          ? `${hiddenLate} late-night ${hiddenLate === 1 ? 'match is' : 'matches are'} hidden to protect your sleep.`
-          : 'No matches scheduled on this day.'}
-      </p>
       {hiddenLate > 0 && (
         <button
           type="button"
@@ -494,7 +489,7 @@ function EmptyDayState({ hiddenLate, onShowLate }) {
           className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm font-semibold text-slate-200 transition active:scale-95"
         >
           <Eye className="h-4 w-4" />
-          Show late games anyway
+          Show late ({hiddenLate})
         </button>
       )}
     </div>
@@ -552,20 +547,13 @@ function Header({ onRefresh, refreshing, lastUpdated, bedtimeOnly, onToggleBedti
             ) : (
               <Sparkles className="h-4 w-4 shrink-0 text-cyan-400" />
             )}
-            <span className="min-w-0">
-              <span
-                className={[
-                  'block truncate text-xs font-bold',
-                  bedtimeOnly ? 'text-emerald-200' : 'text-slate-200',
-                ].join(' ')}
-              >
-                {bedtimeOnly ? 'Bedtime-Friendly only' : 'Showing all matches'}
-              </span>
-              <span className="block truncate text-[10px] text-slate-400">
-                {bedtimeOnly
-                  ? 'Kickoffs ≤ 10:00 PM KSA'
-                  : 'Late-night & dawn games included'}
-              </span>
+            <span
+              className={[
+                'truncate text-sm font-bold',
+                bedtimeOnly ? 'text-emerald-200' : 'text-slate-200',
+              ].join(' ')}
+            >
+              {bedtimeOnly ? 'Before 10 PM' : 'All matches'}
             </span>
           </span>
           {/* Toggle pill */}
@@ -748,15 +736,12 @@ export default function App() {
               className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 text-xs font-semibold text-slate-400 transition active:scale-[0.99]"
             >
               <EyeOff className="h-3.5 w-3.5" />
-              {hiddenLateCount} late{' '}
-              {hiddenLateCount === 1 ? 'game' : 'games'} hidden · tap to show
+              +{hiddenLateCount} late
             </button>
           )}
 
-          <p className="pb-8 pt-5 text-center text-[11px] leading-relaxed text-slate-600">
-            All times in Saudi Arabia Standard Time (GMT+3).
-            <br />
-            Converted from each host city’s local kickoff.
+          <p className="pb-8 pt-5 text-center text-[11px] text-slate-600">
+            Times in KSA (GMT+3)
           </p>
         </div>
       </>
