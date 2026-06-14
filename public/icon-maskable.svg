@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgm" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+  </defs>
+  <!-- Full-bleed background (no rounding; the OS mask handles the shape) -->
+  <rect width="512" height="512" fill="url(#bgm)"/>
+  <!-- Moon scaled to ~60% and centered, well inside the 80% safe zone -->
+  <g transform="translate(256 256) scale(0.62) translate(-256 -256)">
+    <path
+      fill="#0f172a"
+      d="M256 116c-77.3 0-140 62.7-140 140s62.7 140 140 140c34.6 0 66.3-12.6 90.7-33.4-9.2 2.2-18.8 3.4-28.7 3.4-68.5 0-124-55.5-124-124 0-49.6 29.1-92.4 71.2-112.3C264.4 116.4 260.2 116 256 116z"/>
+    <circle cx="350" cy="170" r="13" fill="#0f172a"/>
+    <circle cx="392" cy="232" r="9" fill="#0f172a"/>
+  </g>
+</svg>
