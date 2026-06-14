@@ -50,6 +50,13 @@ const STADIUM_TZ = {
 }
 const FALLBACK_TZ = 'America/New_York'
 
+// Top-level stage filter chips.
+const STAGE_TABS = [
+  { value: 'all', label: 'All' },
+  { value: 'group', label: 'Groups' },
+  { value: 'knockout', label: 'Knockouts' },
+]
+
 const STAGE_LABELS = {
   group: 'Group Stage',
   r32: 'Round of 32',
@@ -212,6 +219,7 @@ function buildMatches(rawGames) {
       isBedtime: hour <= BEDTIME_CUTOFF_HOUR && hour >= 6, // friendly window 6am–10pm
       isLate: hour > BEDTIME_CUTOFF_HOUR || hour < 6, // 11pm–5:59am = late/dawn
       stage: stageChip(g),
+      isKnockout: str(g.type).toLowerCase() !== 'group',
       home,
       away,
       homeScore: str(g.home_score),
@@ -588,6 +596,7 @@ export default function App() {
   const [lastUpdated, setLastUpdated] = useState(null)
 
   const [bedtimeOnly, setBedtimeOnly] = useState(true)
+  const [stageFilter, setStageFilter] = useState('all') // 'all' | 'group' | 'knockout'
   const [selectedDate, setSelectedDate] = useState(null) // dateKey
   const activeChipRef = useRef(null)
 
@@ -624,22 +633,30 @@ export default function App() {
     [rawGames],
   )
 
-  // Day groups are ALWAYS based on the full schedule, so the day strip is
-  // stable whether or not the bedtime filter is on.
-  const dayGroups = useMemo(() => groupByDate(allMatches), [allMatches])
+  // Apply the stage filter first, so the day strip only offers days that
+  // actually have matches for the chosen stage (e.g. pick Knockouts and the
+  // day tabs jump straight to the knockout days — no scrolling past groups).
+  const stageMatches = useMemo(() => {
+    if (stageFilter === 'group') return allMatches.filter((m) => !m.isKnockout)
+    if (stageFilter === 'knockout') return allMatches.filter((m) => m.isKnockout)
+    return allMatches
+  }, [allMatches, stageFilter])
 
-  // Pick a sensible default selected day: today if it has games, else the
-  // next upcoming day, else the first available.
+  // Day groups follow the stage filter (but not the bedtime toggle, so the
+  // strip stays stable when you just hide late games).
+  const dayGroups = useMemo(() => groupByDate(stageMatches), [stageMatches])
+
+  // Pick a sensible selected day. Runs on first load AND whenever the stage
+  // filter changes the available days (if the current pick is no longer valid):
+  // prefer today, else the next upcoming day, else the first available.
   useEffect(() => {
-    if (selectedDate || dayGroups.length === 0) return
+    if (dayGroups.length === 0) return
+    const stillValid = dayGroups.some((g) => g.dateKey === selectedDate)
+    if (stillValid) return
     const todayKey = todayKsaKey()
     const exact = dayGroups.find((g) => g.dateKey === todayKey)
-    if (exact) {
-      setSelectedDate(exact.dateKey)
-      return
-    }
     const upcoming = dayGroups.find((g) => g.dateKey >= todayKey)
-    setSelectedDate((upcoming || dayGroups[0]).dateKey)
+    setSelectedDate((exact || upcoming || dayGroups[0]).dateKey)
   }, [dayGroups, selectedDate])
 
   // Keep the selected day chip scrolled into view.
@@ -679,9 +696,28 @@ export default function App() {
   } else {
     body = (
       <>
-        {/* Day strip */}
+        {/* Stage filter + day strip (stacked, sticky under the header) */}
         <div className="sticky top-[118px] z-40 border-b border-slate-800/60 bg-slate-950/80 backdrop-blur-lg">
           <div className="mx-auto max-w-md">
+            {/* Stage segmented control */}
+            <div className="flex gap-1.5 px-4 pt-2.5">
+              {STAGE_TABS.map((t) => (
+                <button
+                  key={t.value}
+                  type="button"
+                  onClick={() => setStageFilter(t.value)}
+                  className={[
+                    'min-h-[36px] flex-1 rounded-lg px-2 text-xs font-bold transition active:scale-95',
+                    stageFilter === t.value
+                      ? 'bg-cyan-500 text-slate-950'
+                      : 'bg-slate-900/70 text-slate-400 ring-1 ring-inset ring-slate-800',
+                  ].join(' ')}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            {/* Day chips */}
             <div className="flex gap-2 overflow-x-auto px-4 py-2.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {dayGroups.map((g) => (
                 <DayChip
