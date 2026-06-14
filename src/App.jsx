@@ -1,14 +1,17 @@
-import { useEffect, useMemo, useState, useCallback } from 'react'
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import {
   Moon,
+  Sun,
   RefreshCw,
-  AlertTriangle,
   CalendarDays,
   Clock,
   Trophy,
-  Sparkles,
   WifiOff,
   ChevronRight,
+  BedDouble,
+  Eye,
+  EyeOff,
+  Sparkles,
 } from 'lucide-react'
 
 /* ------------------------------------------------------------------ *
@@ -17,16 +20,36 @@ import {
 
 const API_URL = 'https://worldcup26.ir/get/games'
 
-// The cutoff: only show matches that kick off at or before 22:00 (10 PM) KSA.
-const CUTOFF_HOUR_KSA = 22
+// Only kickoffs at or before this KSA hour count as "bedtime-friendly".
+const BEDTIME_CUTOFF_HOUR = 22 // 10:00 PM KSA
 
-// The API's `local_date` carries the SAME wall-clock value as the Persian
-// (Tehran) timestamp, i.e. it is Tehran local time = UTC+03:30.
-// KSA (Arabia Standard Time) is UTC+03:00. So KSA = Tehran − 30 minutes.
-const TEHRAN_OFFSET_MIN = 3 * 60 + 30 // +3:30
-const KSA_OFFSET_MIN = 3 * 60 //         +3:00
+const KSA_TZ = 'Asia/Riyadh' // GMT+3, no DST
 
-// Human-readable labels for the API's `type` codes.
+// The feed's `local_date` is each HOST STADIUM's own local wall-clock time
+// (the 2026 World Cup is hosted across the US / Mexico / Canada, spanning
+// several timezones). To get a correct KSA time we must interpret each match
+// in its stadium's timezone, then convert. IANA zones handle DST for us
+// (June–July = daylight time in North America).
+const STADIUM_TZ = {
+  1: 'America/Mexico_City', // Estadio Azteca, Mexico City
+  2: 'America/Mexico_City', // Estadio Akron, Guadalajara
+  3: 'America/Monterrey', //   Estadio BBVA, Monterrey
+  4: 'America/Chicago', //     AT&T Stadium, Dallas
+  5: 'America/Chicago', //     NRG Stadium, Houston
+  6: 'America/Chicago', //     Arrowhead, Kansas City
+  7: 'America/New_York', //    Mercedes-Benz, Atlanta
+  8: 'America/New_York', //    Hard Rock, Miami
+  9: 'America/New_York', //    Gillette, Boston
+  10: 'America/New_York', //   Lincoln Financial, Philadelphia
+  11: 'America/New_York', //   MetLife, New York/New Jersey
+  12: 'America/Toronto', //    BMO Field, Toronto
+  13: 'America/Vancouver', //  BC Place, Vancouver
+  14: 'America/Los_Angeles', //Lumen Field, Seattle
+  15: 'America/Los_Angeles', //Levi's, San Francisco Bay Area
+  16: 'America/Los_Angeles', //SoFi, Los Angeles
+}
+const FALLBACK_TZ = 'America/New_York'
+
 const STAGE_LABELS = {
   group: 'Group Stage',
   r32: 'Round of 32',
@@ -38,95 +61,86 @@ const STAGE_LABELS = {
 }
 
 /* ------------------------------------------------------------------ *
- * Time helpers
+ * Timezone helpers (Intl-based, DST-correct)
  * ------------------------------------------------------------------ */
 
-/**
- * Parse the API's Tehran wall-clock string ("MM/DD/YYYY HH:mm") and return a
- * normalized object expressed in KSA (UTC+03:00) time.
- *
- * Strategy: build the true UTC instant by treating the components as Tehran
- * time (subtract the +3:30 offset), then re-read the instant shifted into KSA
- * (+3:00) so we can pull the KSA hour / minute / calendar date safely — this
- * also handles games that roll across midnight after the −30min shift.
- *
- * Returns null if the string can't be parsed (defensive: API is third-party).
- */
-function parseToKsa(localDate) {
-  if (typeof localDate !== 'string') return null
-  const m = localDate.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})$/)
-  if (!m) return null
-
-  const month = Number(m[1])
-  const day = Number(m[2])
-  const year = Number(m[3])
-  const hour = Number(m[4])
-  const minute = Number(m[5])
-
-  if (
-    !Number.isFinite(month) ||
-    !Number.isFinite(day) ||
-    !Number.isFinite(year) ||
-    !Number.isFinite(hour) ||
-    !Number.isFinite(minute)
-  ) {
-    return null
-  }
-
-  // True UTC instant: Tehran clock minus Tehran's offset.
-  const utcMs = Date.UTC(year, month - 1, day, hour, minute) - TEHRAN_OFFSET_MIN * 60_000
-
-  // Shift the instant into KSA so getUTC* methods read KSA wall-clock values.
-  const ksaShifted = new Date(utcMs + KSA_OFFSET_MIN * 60_000)
-
-  const ksaHour = ksaShifted.getUTCHours()
-  const ksaMinute = ksaShifted.getUTCMinutes()
-
-  // Stable key for grouping by KSA calendar date (YYYY-MM-DD).
-  const y = ksaShifted.getUTCFullYear()
-  const mo = String(ksaShifted.getUTCMonth() + 1).padStart(2, '0')
-  const d = String(ksaShifted.getUTCDate()).padStart(2, '0')
-  const dateKey = `${y}-${mo}-${d}`
-
-  return {
-    instantMs: utcMs, // for chronological sorting
-    ksaHour,
-    ksaMinute,
-    dateKey,
-    // Pretty 12-hour KSA time, e.g. "8:30 PM".
-    time12: formatTime12(ksaHour, ksaMinute),
-    // Pretty long date for headers, e.g. "Sun, Jun 14".
-    dateLabel: formatDateLabel(ksaShifted),
-  }
+// Offset (in minutes) of `timeZone` at the given UTC instant.
+function tzOffsetMinutes(date, timeZone) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+  const map = {}
+  for (const p of dtf.formatToParts(date)) map[p.type] = p.value
+  // Some environments render midnight as "24" — normalize.
+  const hour = map.hour === '24' ? '00' : map.hour
+  const asUTC = Date.UTC(
+    Number(map.year),
+    Number(map.month) - 1,
+    Number(map.day),
+    Number(hour),
+    Number(map.minute),
+    Number(map.second),
+  )
+  return (asUTC - date.getTime()) / 60000
 }
 
-function formatTime12(hour24, minute) {
-  const period = hour24 >= 12 ? 'PM' : 'AM'
-  let h = hour24 % 12
-  if (h === 0) h = 12
-  const mm = String(minute).padStart(2, '0')
-  return `${h}:${mm} ${period}`
+// Interpret wall-clock components AS LOCAL to `timeZone` and return true UTC.
+function zonedWallClockToUtc(y, mo, d, h, mi, timeZone) {
+  const guess = new Date(Date.UTC(y, mo - 1, d, h, mi))
+  const off1 = tzOffsetMinutes(guess, timeZone)
+  let utc = new Date(guess.getTime() - off1 * 60000)
+  const off2 = tzOffsetMinutes(utc, timeZone)
+  if (off2 !== off1) utc = new Date(guess.getTime() - off2 * 60000)
+  return utc
 }
 
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-const MONTHS = [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-]
+// Cached formatters keyed by purpose (cheap reuse across 100+ matches).
+const fmtKsaTime = new Intl.DateTimeFormat('en-US', {
+  timeZone: KSA_TZ,
+  hour: 'numeric',
+  minute: '2-digit',
+  hour12: true,
+})
+const fmtKsaHour24 = new Intl.DateTimeFormat('en-US', {
+  timeZone: KSA_TZ,
+  hour: '2-digit',
+  hour12: false,
+})
+const fmtKsaDateKey = new Intl.DateTimeFormat('en-CA', {
+  timeZone: KSA_TZ, // en-CA => YYYY-MM-DD
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+})
+const fmtKsaWeekday = new Intl.DateTimeFormat('en-US', {
+  timeZone: KSA_TZ,
+  weekday: 'short',
+})
+const fmtKsaDayNum = new Intl.DateTimeFormat('en-US', {
+  timeZone: KSA_TZ,
+  day: 'numeric',
+})
+const fmtKsaMonth = new Intl.DateTimeFormat('en-US', {
+  timeZone: KSA_TZ,
+  month: 'short',
+})
 
-// Format using the UTC fields of an already-KSA-shifted Date.
-function formatDateLabel(ksaShiftedDate) {
-  const wd = WEEKDAYS[ksaShiftedDate.getUTCDay()]
-  const mo = MONTHS[ksaShiftedDate.getUTCMonth()]
-  const d = ksaShiftedDate.getUTCDate()
-  return `${wd}, ${mo} ${d}`
+function ksaHour24(utcDate) {
+  const h = fmtKsaHour24.format(utcDate)
+  return parseInt(h, 10) % 24
 }
 
 /* ------------------------------------------------------------------ *
- * Data shaping
+ * Field helpers
  * ------------------------------------------------------------------ */
 
-// Normalize a possibly-quoted/empty string field to a trimmed value or "".
 function str(v) {
   if (v === null || v === undefined) return ''
   const s = String(v).trim()
@@ -134,21 +148,14 @@ function str(v) {
   return s
 }
 
-// Resolve a team's display name. For knockout games the API uses
-// `home_team_label` / `away_team_label` (e.g. "Winner Group A"); once teams
-// qualify it switches to `home_team_name_en`. We prefer the real country name
-// and gracefully fall back to the structural placeholder, then to "TBD".
 function resolveTeam(game, side) {
   const name = str(game[`${side}_team_name_en`])
   if (name) return { name, isPlaceholder: false }
-
   const label = str(game[`${side}_team_label`])
   if (label) return { name: label, isPlaceholder: true }
-
   return { name: 'TBD', isPlaceholder: true }
 }
 
-// Derive the small stage/group chip text, e.g. "Group C" or "Round of 16".
 function stageChip(game) {
   const type = str(game.type).toLowerCase()
   if (type === 'group') {
@@ -158,110 +165,90 @@ function stageChip(game) {
   return STAGE_LABELS[type] || str(game.group) || 'Knockout'
 }
 
-// Match status. The live feed currently only ever reports "notstarted" or
-// "finished", so in practice we render Upcoming + Finished. We still detect a
-// live state defensively so the card lights up correctly if the feed ever
-// starts reporting in-progress matches mid-tournament.
 function deriveStatus(game) {
   const finished = str(game.finished).toLowerCase() === 'true'
   const elapsed = str(game.time_elapsed).toLowerCase()
-
   if (finished || elapsed === 'finished') return 'finished'
   if (elapsed === 'notstarted' || elapsed === '') return 'upcoming'
-  // Anything else (a minute count like "57'", "ht", "live", ...) => live.
   return 'live'
 }
 
-// Parse a "{"A. Player 12'","B. Player 45'"}" style scorer blob into names.
-// The feed is inconsistently escaped (curly + straight quotes), so we strip
-// the wrapping braces and split on quote-delimited tokens defensively.
-function parseScorers(raw) {
-  const s = str(raw)
-  if (!s || s === '{}') return []
-  const inner = s.replace(/^\{/, '').replace(/\}$/, '')
-  // Grab anything between any kind of double-quote (straight or curly).
-  const matches = inner.match(/[“"]([^”"]+)[”"]/g)
-  if (matches) {
-    return matches.map((t) => t.replace(/[“”"]/g, '').trim()).filter(Boolean)
-  }
-  // Fallback: comma split.
-  return inner
-    .split(',')
-    .map((t) => t.replace(/[“”"]/g, '').trim())
-    .filter(Boolean)
-}
+/* ------------------------------------------------------------------ *
+ * View-model builder
+ * ------------------------------------------------------------------ */
 
-/**
- * Build the full view model from the raw API payload:
- *  - parse + convert times to KSA
- *  - apply the ≤ 22:00 cutoff filter
- *  - sort chronologically and group by KSA calendar date
- * Returns { dateGroups, keptCount, droppedCount, unparsedCount }.
- */
-function buildViewModel(rawGames) {
+function buildMatches(rawGames) {
   const games = Array.isArray(rawGames) ? rawGames : []
-
-  let droppedCount = 0
-  let unparsedCount = 0
-  const kept = []
+  const out = []
 
   for (const g of games) {
-    const ksa = parseToKsa(g.local_date)
-    if (!ksa) {
-      unparsedCount += 1
-      continue
-    }
-    // The rigid rule: keep only kickoffs at or before 22:00 KSA.
-    if (ksa.ksaHour > CUTOFF_HOUR_KSA) {
-      droppedCount += 1
-      continue
-    }
+    const ld = str(g.local_date)
+    const m = ld.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})$/)
+    if (!m) continue
 
+    const tz = STADIUM_TZ[Number(g.stadium_id)] || FALLBACK_TZ
+    const utc = zonedWallClockToUtc(
+      Number(m[3]),
+      Number(m[1]),
+      Number(m[2]),
+      Number(m[4]),
+      Number(m[5]),
+      tz,
+    )
+
+    const hour = ksaHour24(utc)
     const home = resolveTeam(g, 'home')
     const away = resolveTeam(g, 'away')
-    const status = deriveStatus(g)
 
-    kept.push({
-      id: str(g.id) || str(g._id) || `${ksa.instantMs}-${home.name}`,
-      ksa,
+    out.push({
+      id: str(g.id) || str(g._id) || `${utc.getTime()}-${home.name}`,
+      utcMs: utc.getTime(),
+      dateKey: fmtKsaDateKey.format(utc), // YYYY-MM-DD in KSA
+      weekday: fmtKsaWeekday.format(utc),
+      dayNum: fmtKsaDayNum.format(utc),
+      monthShort: fmtKsaMonth.format(utc),
+      timeLabel: fmtKsaTime.format(utc), // "10:00 PM"
+      ksaHour: hour,
+      isBedtime: hour <= BEDTIME_CUTOFF_HOUR && hour >= 6, // friendly window 6am–10pm
+      isLate: hour > BEDTIME_CUTOFF_HOUR || hour < 6, // 11pm–5:59am = late/dawn
       stage: stageChip(g),
       home,
       away,
       homeScore: str(g.home_score),
       awayScore: str(g.away_score),
-      homeScorers: parseScorers(g.home_scorers),
-      awayScorers: parseScorers(g.away_scorers),
-      status,
+      status: deriveStatus(g),
     })
   }
 
-  // Chronological sort by true instant.
-  kept.sort((a, b) => a.ksa.instantMs - b.ksa.instantMs)
+  out.sort((a, b) => a.utcMs - b.utcMs)
+  return out
+}
 
-  // Group by KSA calendar date, preserving chronological order.
-  const groupMap = new Map()
-  for (const match of kept) {
-    const key = match.ksa.dateKey
-    if (!groupMap.has(key)) {
-      groupMap.set(key, {
-        dateKey: key,
-        dateLabel: match.ksa.dateLabel,
+// Group an already-sorted match list into [{dateKey, label, sub, matches}].
+function groupByDate(matches) {
+  const map = new Map()
+  for (const mt of matches) {
+    if (!map.has(mt.dateKey)) {
+      map.set(mt.dateKey, {
+        dateKey: mt.dateKey,
+        weekday: mt.weekday,
+        dayNum: mt.dayNum,
+        monthShort: mt.monthShort,
         matches: [],
       })
     }
-    groupMap.get(key).matches.push(match)
+    map.get(mt.dateKey).matches.push(mt)
   }
+  return Array.from(map.values())
+}
 
-  return {
-    dateGroups: Array.from(groupMap.values()),
-    keptCount: kept.length,
-    droppedCount,
-    unparsedCount,
-  }
+// Today's KSA date key, for default selection + "Today" labelling.
+function todayKsaKey() {
+  return fmtKsaDateKey.format(new Date())
 }
 
 /* ------------------------------------------------------------------ *
- * Presentational components
+ * Small UI pieces
  * ------------------------------------------------------------------ */
 
 function StatusBadge({ status }) {
@@ -287,7 +274,7 @@ function StatusBadge({ status }) {
   )
 }
 
-function TeamRow({ team, score, showScore, emphasizeWinner, isWinner }) {
+function TeamRow({ team, score, showScore, isWinner }) {
   return (
     <div className="flex min-w-0 items-center justify-between gap-3 py-1.5">
       <span
@@ -296,7 +283,7 @@ function TeamRow({ team, score, showScore, emphasizeWinner, isWinner }) {
           team.isPlaceholder
             ? 'italic text-slate-400'
             : 'font-semibold text-slate-100',
-          emphasizeWinner && isWinner ? 'text-white' : '',
+          isWinner ? 'text-white' : '',
         ].join(' ')}
         title={team.name}
       >
@@ -306,7 +293,7 @@ function TeamRow({ team, score, showScore, emphasizeWinner, isWinner }) {
         <span
           className={[
             'shrink-0 tabular-nums text-base font-bold',
-            emphasizeWinner && isWinner ? 'text-white' : 'text-slate-200',
+            isWinner ? 'text-white' : 'text-slate-300',
           ].join(' ')}
         >
           {score === '' ? '–' : score}
@@ -320,7 +307,6 @@ function MatchCard({ match }) {
   const isFinished = match.status === 'finished'
   const showScore = isFinished || match.status === 'live'
 
-  // Decide winner only when finished and scores are real numbers.
   let homeWins = false
   let awayWins = false
   if (isFinished) {
@@ -333,8 +319,14 @@ function MatchCard({ match }) {
   }
 
   return (
-    <article className="rounded-2xl border border-slate-800 bg-slate-900/70 p-3.5 shadow-lg shadow-black/20 transition-colors active:bg-slate-800/70">
-      {/* Top line: stage chip + status */}
+    <article
+      className={[
+        'rounded-2xl border p-3.5 shadow-lg shadow-black/20 transition-colors active:bg-slate-800/70',
+        match.isLate
+          ? 'border-slate-800/70 bg-slate-900/40'
+          : 'border-slate-700/80 bg-slate-900/80',
+      ].join(' ')}
+    >
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="inline-flex items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-slate-400">
           <Trophy className="h-3 w-3 text-slate-500" />
@@ -343,58 +335,89 @@ function MatchCard({ match }) {
         <StatusBadge status={match.status} />
       </div>
 
-      {/* Teams stacked for clean vertical reading */}
       <div className="divide-y divide-slate-800/80">
         <TeamRow
           team={match.home}
           score={match.homeScore}
           showScore={showScore}
-          emphasizeWinner={isFinished}
           isWinner={homeWins}
         />
         <TeamRow
           team={match.away}
           score={match.awayScore}
           showScore={showScore}
-          emphasizeWinner={isFinished}
           isWinner={awayWins}
         />
       </div>
 
-      {/* Bottom line: prominent KSA kickoff time */}
       <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-slate-800 pt-2.5">
-        <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-cyan-300">
+        <span
+          className={[
+            'inline-flex items-center gap-1.5 text-sm font-semibold',
+            match.isLate ? 'text-slate-400' : 'text-cyan-300',
+          ].join(' ')}
+        >
           <Clock className="h-3.5 w-3.5" />
-          {match.ksa.time12}
+          {match.timeLabel}
+          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            KSA
+          </span>
         </span>
-        <span className="rounded-md bg-cyan-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-cyan-400/90 ring-1 ring-inset ring-cyan-500/20">
-          KSA Time
-        </span>
+
+        {match.isLate ? (
+          <span className="inline-flex items-center gap-1 rounded-md bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-300 ring-1 ring-inset ring-indigo-500/25">
+            <Moon className="h-3 w-3" />
+            Late
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-300 ring-1 ring-inset ring-emerald-500/25">
+            <BedDouble className="h-3 w-3" />
+            OK
+          </span>
+        )}
       </div>
     </article>
   )
 }
 
-function DateSection({ group }) {
+/* ---- Day selector (horizontal, sticky, scrollable chips) ---- */
+
+function DayChip({ group, isActive, isToday, onClick, refCb }) {
+  const friendly = group.matches.some((m) => m.isBedtime)
   return (
-    <section className="mb-6">
-      <div className="mb-2.5 flex items-center gap-2 px-0.5">
-        <CalendarDays className="h-4 w-4 text-slate-500" />
-        <h2 className="text-sm font-bold text-slate-200">{group.dateLabel}</h2>
-        <span className="text-xs text-slate-500">
-          · {group.matches.length} {group.matches.length === 1 ? 'match' : 'matches'}
-        </span>
-      </div>
-      <div className="space-y-3">
-        {group.matches.map((m) => (
-          <MatchCard key={m.id} match={m} />
-        ))}
-      </div>
-    </section>
+    <button
+      ref={refCb}
+      type="button"
+      onClick={onClick}
+      className={[
+        'flex min-h-[56px] min-w-[58px] shrink-0 flex-col items-center justify-center rounded-xl border px-2.5 py-1.5 transition active:scale-95',
+        isActive
+          ? 'border-cyan-400/60 bg-cyan-500/15 text-cyan-200'
+          : 'border-slate-800 bg-slate-900/60 text-slate-400',
+      ].join(' ')}
+    >
+      <span className="text-[10px] font-semibold uppercase tracking-wide">
+        {isToday ? 'Today' : group.weekday}
+      </span>
+      <span
+        className={[
+          'text-base font-bold leading-tight',
+          isActive ? 'text-white' : 'text-slate-200',
+        ].join(' ')}
+      >
+        {group.dayNum}
+      </span>
+      <span className="flex items-center gap-0.5 text-[9px] text-slate-500">
+        {group.monthShort}
+        {friendly && (
+          <span className="h-1 w-1 rounded-full bg-emerald-400" />
+        )}
+      </span>
+    </button>
   )
 }
 
-/* --------- Full-screen states (loading / error / empty) ---------- */
+/* ---- Loading / error / empty ---- */
 
 function SkeletonCard() {
   return (
@@ -419,7 +442,7 @@ function LoadingState() {
         <RefreshCw className="h-4 w-4 animate-spin text-cyan-400" />
         Loading fixtures…
       </div>
-      {Array.from({ length: 5 }).map((_, i) => (
+      {Array.from({ length: 4 }).map((_, i) => (
         <SkeletonCard key={i} />
       ))}
     </div>
@@ -450,31 +473,42 @@ function ErrorState({ message, onRetry }) {
   )
 }
 
-function EmptyState() {
+function EmptyDayState({ hiddenLate, onShowLate }) {
   return (
-    <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
+    <div className="flex flex-col items-center justify-center px-6 py-14 text-center">
       <div className="mb-4 rounded-full bg-slate-800 p-4 ring-1 ring-inset ring-slate-700">
-        <Moon className="h-7 w-7 text-slate-400" />
+        <BedDouble className="h-7 w-7 text-emerald-300" />
       </div>
       <h2 className="mb-1 text-base font-bold text-slate-100">
-        No bedtime-friendly matches
+        Nothing before 10 PM today
       </h2>
-      <p className="max-w-xs text-sm text-slate-400">
-        Every upcoming kickoff is after 10:00 PM KSA, so they’re all hidden to
-        protect your sleep. Check back soon.
+      <p className="mb-5 max-w-xs text-sm text-slate-400">
+        {hiddenLate > 0
+          ? `${hiddenLate} late-night ${hiddenLate === 1 ? 'match is' : 'matches are'} hidden to protect your sleep.`
+          : 'No matches scheduled on this day.'}
       </p>
+      {hiddenLate > 0 && (
+        <button
+          type="button"
+          onClick={onShowLate}
+          className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm font-semibold text-slate-200 transition active:scale-95"
+        >
+          <Eye className="h-4 w-4" />
+          Show late games anyway
+        </button>
+      )}
     </div>
   )
 }
 
 /* ------------------------------------------------------------------ *
- * Header (sticky, blurred) + filter badge
+ * Header
  * ------------------------------------------------------------------ */
 
-function Header({ onRefresh, refreshing, lastUpdated }) {
+function Header({ onRefresh, refreshing, lastUpdated, bedtimeOnly, onToggleBedtime }) {
   return (
-    <header className="sticky top-0 z-50 border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-lg">
-      <div className="mx-auto flex max-w-md items-center justify-between gap-2 px-4 pb-2 pt-3">
+    <header className="sticky top-0 z-50 border-b border-slate-800/80 bg-slate-950/85 backdrop-blur-lg">
+      <div className="mx-auto flex max-w-md items-center justify-between gap-2 px-4 pb-2.5 pt-3">
         <div className="flex min-w-0 items-center gap-2.5">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-400 to-emerald-500 shadow-lg shadow-cyan-500/20">
             <Moon className="h-5 w-5 text-slate-950" />
@@ -484,16 +518,14 @@ function Header({ onRefresh, refreshing, lastUpdated }) {
               WC 2026 Tracker
             </h1>
             <p className="truncate text-[11px] leading-tight text-slate-400">
-              {lastUpdated
-                ? `Updated ${lastUpdated}`
-                : 'Personal bedtime edition'}
+              {lastUpdated ? `Updated ${lastUpdated} · KSA` : 'KSA time'}
             </p>
           </div>
         </div>
         <button
           type="button"
           onClick={onRefresh}
-          aria-label="Refresh matches"
+          aria-label="Refresh"
           className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-slate-700 bg-slate-900 text-slate-300 transition active:scale-95 active:bg-slate-800"
         >
           <RefreshCw
@@ -502,24 +534,62 @@ function Header({ onRefresh, refreshing, lastUpdated }) {
         </button>
       </div>
 
-      {/* Always-visible filter status badge (also sticky as part of header) */}
+      {/* Bedtime filter toggle — the comfort control */}
       <div className="mx-auto max-w-md px-4 pb-2.5">
-        <div className="flex items-center gap-2 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-3 py-2">
-          <Sparkles className="h-4 w-4 shrink-0 text-emerald-400" />
-          <p className="text-xs font-semibold leading-tight text-emerald-200">
-            Bedtime-Friendly{' '}
-            <span className="font-medium text-emerald-300/80">
-              (Kickoffs ≤ 10:00 PM KSA)
+        <button
+          type="button"
+          onClick={onToggleBedtime}
+          className={[
+            'flex w-full items-center justify-between gap-2 rounded-xl border px-3 py-2.5 text-left transition active:scale-[0.99]',
+            bedtimeOnly
+              ? 'border-emerald-500/30 bg-emerald-500/10'
+              : 'border-slate-700 bg-slate-900/70',
+          ].join(' ')}
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            {bedtimeOnly ? (
+              <BedDouble className="h-4 w-4 shrink-0 text-emerald-400" />
+            ) : (
+              <Sparkles className="h-4 w-4 shrink-0 text-cyan-400" />
+            )}
+            <span className="min-w-0">
+              <span
+                className={[
+                  'block truncate text-xs font-bold',
+                  bedtimeOnly ? 'text-emerald-200' : 'text-slate-200',
+                ].join(' ')}
+              >
+                {bedtimeOnly ? 'Bedtime-Friendly only' : 'Showing all matches'}
+              </span>
+              <span className="block truncate text-[10px] text-slate-400">
+                {bedtimeOnly
+                  ? 'Kickoffs ≤ 10:00 PM KSA'
+                  : 'Late-night & dawn games included'}
+              </span>
             </span>
-          </p>
-        </div>
+          </span>
+          {/* Toggle pill */}
+          <span
+            className={[
+              'relative h-6 w-11 shrink-0 rounded-full transition-colors',
+              bedtimeOnly ? 'bg-emerald-500' : 'bg-slate-700',
+            ].join(' ')}
+          >
+            <span
+              className={[
+                'absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all',
+                bedtimeOnly ? 'left-[22px]' : 'left-0.5',
+              ].join(' ')}
+            />
+          </span>
+        </button>
       </div>
     </header>
   )
 }
 
 /* ------------------------------------------------------------------ *
- * Root App
+ * Root
  * ------------------------------------------------------------------ */
 
 export default function App() {
@@ -529,27 +599,24 @@ export default function App() {
   const [error, setError] = useState(null)
   const [lastUpdated, setLastUpdated] = useState(null)
 
+  const [bedtimeOnly, setBedtimeOnly] = useState(true)
+  const [selectedDate, setSelectedDate] = useState(null) // dateKey
+  const activeChipRef = useRef(null)
+
   const fetchGames = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true)
     else setLoading(true)
     setError(null)
-
     try {
       const res = await fetch(API_URL, {
         headers: { Accept: 'application/json' },
         cache: 'no-store',
       })
-      if (!res.ok) {
-        throw new Error(`Server responded ${res.status}`)
-      }
+      if (!res.ok) throw new Error(`Server responded ${res.status}`)
       const data = await res.json()
-      const games = Array.isArray(data?.games) ? data.games : []
-      setRawGames(games)
+      setRawGames(Array.isArray(data?.games) ? data.games : [])
       setLastUpdated(
-        new Date().toLocaleTimeString([], {
-          hour: 'numeric',
-          minute: '2-digit',
-        }),
+        new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
@@ -559,55 +626,140 @@ export default function App() {
     }
   }, [])
 
-  // Fetch dynamically on page load.
   useEffect(() => {
     fetchGames(false)
   }, [fetchGames])
 
-  // Derive the view model (memoized; recomputes only when data changes).
-  const view = useMemo(
-    () => (rawGames ? buildViewModel(rawGames) : null),
+  // All matches (correct KSA), sorted.
+  const allMatches = useMemo(
+    () => (rawGames ? buildMatches(rawGames) : []),
     [rawGames],
   )
+
+  // Day groups are ALWAYS based on the full schedule, so the day strip is
+  // stable whether or not the bedtime filter is on.
+  const dayGroups = useMemo(() => groupByDate(allMatches), [allMatches])
+
+  // Pick a sensible default selected day: today if it has games, else the
+  // next upcoming day, else the first available.
+  useEffect(() => {
+    if (selectedDate || dayGroups.length === 0) return
+    const todayKey = todayKsaKey()
+    const exact = dayGroups.find((g) => g.dateKey === todayKey)
+    if (exact) {
+      setSelectedDate(exact.dateKey)
+      return
+    }
+    const upcoming = dayGroups.find((g) => g.dateKey >= todayKey)
+    setSelectedDate((upcoming || dayGroups[0]).dateKey)
+  }, [dayGroups, selectedDate])
+
+  // Keep the selected day chip scrolled into view.
+  useEffect(() => {
+    if (activeChipRef.current) {
+      activeChipRef.current.scrollIntoView({
+        behavior: 'smooth',
+        inline: 'center',
+        block: 'nearest',
+      })
+    }
+  }, [selectedDate])
+
+  const todayKey = todayKsaKey()
+  const selectedGroup = dayGroups.find((g) => g.dateKey === selectedDate)
+
+  // Matches to show for the selected day, after the bedtime filter.
+  const dayMatches = selectedGroup ? selectedGroup.matches : []
+  const visibleMatches = bedtimeOnly
+    ? dayMatches.filter((m) => m.isBedtime)
+    : dayMatches
+  const hiddenLateCount = dayMatches.filter((m) => m.isLate).length
+
+  /* ---- render ---- */
 
   let body
   if (loading) {
     body = <LoadingState />
   } else if (error) {
     body = <ErrorState message={error} onRetry={() => fetchGames(true)} />
-  } else if (!view || view.dateGroups.length === 0) {
-    body = <EmptyState />
+  } else if (dayGroups.length === 0) {
+    body = (
+      <div className="px-6 py-16 text-center text-sm text-slate-400">
+        No fixtures available right now.
+      </div>
+    )
   } else {
     body = (
-      <div className="px-4 pt-4">
-        {/* Tiny summary line so the user trusts the filter is working */}
-        <div className="mb-4 flex items-center justify-between gap-2 text-[11px] text-slate-500">
-          <span className="inline-flex items-center gap-1">
-            <ChevronRight className="h-3 w-3" />
-            Showing {view.keptCount}{' '}
-            {view.keptCount === 1 ? 'match' : 'matches'}
-          </span>
-          {view.droppedCount > 0 ? (
-            <span className="inline-flex items-center gap-1 text-slate-500">
-              <Moon className="h-3 w-3" />
-              {view.droppedCount} late{' '}
-              {view.droppedCount === 1 ? 'game' : 'games'} hidden
-            </span>
-          ) : (
-            <span className="text-slate-600">No late games today</span>
-          )}
+      <>
+        {/* Day strip */}
+        <div className="sticky top-[118px] z-40 border-b border-slate-800/60 bg-slate-950/80 backdrop-blur-lg">
+          <div className="mx-auto max-w-md">
+            <div className="flex gap-2 overflow-x-auto px-4 py-2.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {dayGroups.map((g) => (
+                <DayChip
+                  key={g.dateKey}
+                  group={g}
+                  isActive={g.dateKey === selectedDate}
+                  isToday={g.dateKey === todayKey}
+                  onClick={() => setSelectedDate(g.dateKey)}
+                  refCb={g.dateKey === selectedDate ? activeChipRef : null}
+                />
+              ))}
+            </div>
+          </div>
         </div>
 
-        {view.dateGroups.map((group) => (
-          <DateSection key={group.dateKey} group={group} />
-        ))}
+        {/* Selected day's matches */}
+        <div className="mx-auto max-w-md px-4 pt-4">
+          {selectedGroup && (
+            <div className="mb-3 flex items-center justify-between gap-2 px-0.5">
+              <div className="flex items-center gap-2">
+                <CalendarDays className="h-4 w-4 text-slate-500" />
+                <h2 className="text-sm font-bold text-slate-200">
+                  {selectedGroup.dateKey === todayKey
+                    ? 'Today'
+                    : `${selectedGroup.weekday}, ${selectedGroup.monthShort} ${selectedGroup.dayNum}`}
+                </h2>
+              </div>
+              <span className="text-[11px] text-slate-500">
+                {visibleMatches.length}/{dayMatches.length} shown
+              </span>
+            </div>
+          )}
 
-        <p className="pb-8 pt-2 text-center text-[11px] leading-relaxed text-slate-600">
-          Times shown in Saudi Arabia Standard Time (GMT+3).
-          <br />
-          Late-night kickoffs after 10 PM are filtered out.
-        </p>
-      </div>
+          {visibleMatches.length === 0 ? (
+            <EmptyDayState
+              hiddenLate={hiddenLateCount}
+              onShowLate={() => setBedtimeOnly(false)}
+            />
+          ) : (
+            <div className="space-y-3">
+              {visibleMatches.map((m) => (
+                <MatchCard key={m.id} match={m} />
+              ))}
+            </div>
+          )}
+
+          {/* When filtering, hint how many late games are tucked away */}
+          {bedtimeOnly && hiddenLateCount > 0 && visibleMatches.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setBedtimeOnly(false)}
+              className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 text-xs font-semibold text-slate-400 transition active:scale-[0.99]"
+            >
+              <EyeOff className="h-3.5 w-3.5" />
+              {hiddenLateCount} late{' '}
+              {hiddenLateCount === 1 ? 'game' : 'games'} hidden · tap to show
+            </button>
+          )}
+
+          <p className="pb-8 pt-5 text-center text-[11px] leading-relaxed text-slate-600">
+            All times in Saudi Arabia Standard Time (GMT+3).
+            <br />
+            Converted from each host city’s local kickoff.
+          </p>
+        </div>
+      </>
     )
   }
 
@@ -617,10 +769,10 @@ export default function App() {
         onRefresh={() => fetchGames(true)}
         refreshing={refreshing}
         lastUpdated={lastUpdated}
+        bedtimeOnly={bedtimeOnly}
+        onToggleBedtime={() => setBedtimeOnly((v) => !v)}
       />
-      <main className="mx-auto max-w-md pb-[env(safe-area-inset-bottom)]">
-        {body}
-      </main>
+      <main className="pb-[env(safe-area-inset-bottom)]">{body}</main>
     </div>
   )
 }
