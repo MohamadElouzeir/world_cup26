@@ -12,6 +12,7 @@ import {
   Eye,
   EyeOff,
   Sparkles,
+  BellPlus,
 } from 'lucide-react'
 
 /* ------------------------------------------------------------------ *
@@ -268,6 +269,74 @@ function todayKsaKey() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Calendar reminder (.ics)
+ * ------------------------------------------------------------------ */
+
+// Format an epoch-ms as a UTC iCalendar timestamp: YYYYMMDDTHHMMSSZ.
+function icsUtc(ms) {
+  const d = new Date(ms)
+  const p = (n) => String(n).padStart(2, '0')
+  return (
+    `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}` +
+    `T${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`
+  )
+}
+
+// Escape text per RFC 5545 (commas, semicolons, backslashes, newlines).
+function icsEscape(s) {
+  return String(s)
+    .replace(/\\/g, '\\\\')
+    .replace(/;/g, '\\;')
+    .replace(/,/g, '\\,')
+    .replace(/\r?\n/g, '\\n')
+}
+
+// Build a calendar event for a match, with a 15-minute-before alarm, and hand
+// it to the phone. iOS Calendar / Google Calendar then own the reminder, so it
+// fires even when this app is closed. Match runs ~2h.
+function addMatchReminder(match) {
+  const start = match.utcMs
+  const end = start + 2 * 60 * 60 * 1000
+  const title = `${match.home.name} vs ${match.away.name}`
+  const desc = `${match.stage} · World Cup 2026 · Kickoff ${match.timeLabel} KSA`
+  const uid = `wc26-${match.id}@world-cup26`
+
+  const lines = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//WC26 Tracker//EN',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH',
+    'BEGIN:VEVENT',
+    `UID:${uid}`,
+    `DTSTAMP:${icsUtc(Date.now())}`,
+    `DTSTART:${icsUtc(start)}`,
+    `DTEND:${icsUtc(end)}`,
+    `SUMMARY:${icsEscape(title)}`,
+    `DESCRIPTION:${icsEscape(desc)}`,
+    'BEGIN:VALARM',
+    'ACTION:DISPLAY',
+    `DESCRIPTION:${icsEscape(title)} starts soon`,
+    'TRIGGER:-PT15M',
+    'END:VALARM',
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ]
+  const content = lines.join('\r\n')
+
+  const blob = new Blob([content], { type: 'text/calendar;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${title.replace(/[^a-z0-9]+/gi, '-')}.ics`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  // Revoke a little later so the navigation/open has time to read the blob.
+  setTimeout(() => URL.revokeObjectURL(url), 4000)
+}
+
+/* ------------------------------------------------------------------ *
  * Group standings
  * ------------------------------------------------------------------ */
 
@@ -521,6 +590,19 @@ function MatchCard({ match }) {
           </span>
         )}
       </div>
+
+      {/* Reminder — only useful for matches that haven't started. Adds a
+          calendar event with a 15-min alert to the phone's own Calendar. */}
+      {match.status === 'upcoming' && (
+        <button
+          type="button"
+          onClick={() => addMatchReminder(match)}
+          className="mt-2.5 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800/60 text-xs font-bold text-slate-200 transition active:scale-[0.99] active:bg-slate-700"
+        >
+          <BellPlus className="h-4 w-4 text-cyan-300" />
+          Remind me
+        </button>
+      )}
     </article>
   )
 }
