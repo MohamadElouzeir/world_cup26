@@ -20,8 +20,9 @@ import {
 
 const API_URL = 'https://worldcup26.ir/get/games'
 
-// Only kickoffs at or before this KSA hour count as "bedtime-friendly".
-const BEDTIME_CUTOFF_HOUR = 22 // 10:00 PM KSA
+// Kickoffs up to and including this KSA hour count as "friendly" (i.e. before
+// midnight). 23 = 11 PM, so anything from 00:00 (midnight) onward is "late".
+const BEDTIME_CUTOFF_HOUR = 23 // up to 11:xx PM KSA; cutoff at 12 AM
 
 const KSA_TZ = 'Asia/Riyadh' // GMT+3, no DST
 
@@ -216,8 +217,8 @@ function buildMatches(rawGames) {
       monthShort: fmtKsaMonth.format(utc),
       timeLabel: fmtKsaTime.format(utc), // "10:00 PM"
       ksaHour: hour,
-      isBedtime: hour <= BEDTIME_CUTOFF_HOUR && hour >= 6, // friendly window 6am–10pm
-      isLate: hour > BEDTIME_CUTOFF_HOUR || hour < 6, // 11pm–5:59am = late/dawn
+      isBedtime: hour <= BEDTIME_CUTOFF_HOUR && hour >= 6, // friendly: 6am–11:xx pm
+      isLate: hour > BEDTIME_CUTOFF_HOUR || hour < 6, // 12am–5:59am = late/dawn
       stage: stageChip(g),
       isKnockout: str(g.type).toLowerCase() !== 'group',
       home,
@@ -488,7 +489,7 @@ function EmptyDayState({ hiddenLate, onShowLate }) {
         <BedDouble className="h-7 w-7 text-emerald-300" />
       </div>
       <h2 className="mb-5 text-base font-bold text-slate-100">
-        {hiddenLate > 0 ? 'Nothing before 10 PM' : 'No matches'}
+        {hiddenLate > 0 ? 'Nothing before 12 AM' : 'No matches'}
       </h2>
       {hiddenLate > 0 && (
         <button
@@ -561,7 +562,7 @@ function Header({ onRefresh, refreshing, lastUpdated, bedtimeOnly, onToggleBedti
                 bedtimeOnly ? 'text-emerald-200' : 'text-slate-200',
               ].join(' ')}
             >
-              {bedtimeOnly ? 'Before 10 PM' : 'All matches'}
+              {bedtimeOnly ? 'Before 12 AM' : 'All matches'}
             </span>
           </span>
           {/* Toggle pill */}
