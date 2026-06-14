@@ -334,21 +334,19 @@ function buildStandings(rawGames) {
 // qualifiers); 3rd is amber (possible best-third); 4th is muted.
 function StandingsTable({ group, rows }) {
   return (
-    <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70">
-      <div className="flex items-center gap-2 border-b border-slate-800 px-3 py-2">
-        <span className="flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-cyan-400 to-emerald-500 text-xs font-extrabold text-slate-950">
+    <section className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70">
+      <div className="flex items-center gap-1.5 border-b border-slate-800 px-2 py-1.5">
+        <span className="flex h-5 w-5 items-center justify-center rounded bg-gradient-to-br from-cyan-400 to-emerald-500 text-[11px] font-extrabold text-slate-950">
           {group}
         </span>
-        <span className="text-sm font-bold text-slate-200">Group {group}</span>
+        <span className="text-xs font-bold text-slate-200">Group {group}</span>
       </div>
 
-      {/* Column header */}
-      <div className="flex items-center gap-1 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">
-        <span className="w-4 shrink-0 text-center">#</span>
-        <span className="min-w-0 flex-1">Team</span>
-        <span className="w-5 shrink-0 text-center">P</span>
-        <span className="w-7 shrink-0 text-center">GD</span>
-        <span className="w-7 shrink-0 text-center text-slate-300">Pts</span>
+      {/* Column header — compact for the 2-up grid: just GD and Pts */}
+      <div className="flex items-center gap-1 px-2 py-1 text-[9px] font-bold uppercase tracking-wide text-slate-500">
+        <span className="min-w-0 flex-1 pl-3">Team</span>
+        <span className="w-6 shrink-0 text-center">GD</span>
+        <span className="w-5 shrink-0 text-center text-slate-300">Pt</span>
       </div>
 
       <div className="divide-y divide-slate-800/70">
@@ -356,18 +354,20 @@ function StandingsTable({ group, rows }) {
           const pos = i + 1
           const accent =
             pos <= 2
-              ? 'border-l-2 border-emerald-400'
+              ? 'border-emerald-400'
               : pos === 3
-                ? 'border-l-2 border-amber-400/70'
-                : 'border-l-2 border-transparent'
+                ? 'border-amber-400/70'
+                : 'border-transparent'
+          const placeholder =
+            r.name.toLowerCase().includes('group') || r.name === 'TBD'
           return (
             <div
               key={r.name}
-              className={`flex items-center gap-1 py-2 pl-2 pr-3 ${accent}`}
+              className={`flex items-center gap-1 border-l-2 py-1.5 pl-1.5 pr-2 ${accent}`}
             >
               <span
                 className={[
-                  'w-4 shrink-0 text-center text-xs font-bold',
+                  'w-3 shrink-0 text-center text-[10px] font-bold',
                   pos <= 2 ? 'text-emerald-300' : pos === 3 ? 'text-amber-300' : 'text-slate-500',
                 ].join(' ')}
               >
@@ -375,22 +375,17 @@ function StandingsTable({ group, rows }) {
               </span>
               <span
                 className={[
-                  'min-w-0 flex-1 truncate text-sm',
-                  r.name.toLowerCase().includes('group') || r.name === 'TBD'
-                    ? 'italic text-slate-400'
-                    : 'font-semibold text-slate-100',
+                  'min-w-0 flex-1 truncate text-xs',
+                  placeholder ? 'italic text-slate-400' : 'font-semibold text-slate-100',
                 ].join(' ')}
                 title={r.name}
               >
                 {r.name}
               </span>
-              <span className="w-5 shrink-0 text-center text-xs tabular-nums text-slate-400">
-                {r.p}
-              </span>
-              <span className="w-7 shrink-0 text-center text-xs tabular-nums text-slate-300">
+              <span className="w-6 shrink-0 text-center text-[11px] tabular-nums text-slate-300">
                 {r.gd > 0 ? `+${r.gd}` : r.gd}
               </span>
-              <span className="w-7 shrink-0 text-center text-sm font-extrabold tabular-nums text-white">
+              <span className="w-5 shrink-0 text-center text-xs font-extrabold tabular-nums text-white">
                 {r.pts}
               </span>
             </div>
@@ -929,7 +924,7 @@ export default function App() {
                 No group data available.
               </div>
             ) : (
-              <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-2.5">
                 {standings.map((s) => (
                   <StandingsTable key={s.group} group={s.group} rows={s.rows} />
                 ))}
