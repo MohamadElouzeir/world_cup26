@@ -58,6 +58,16 @@ const STAGE_TABS = [
   { value: 'knockout', label: 'Knockouts' },
 ]
 
+// Sub-round chips shown when "Knockouts" is selected. 'all' = every round.
+const KO_ROUNDS = [
+  { value: 'all', label: 'All' },
+  { value: 'r32', label: 'R32' },
+  { value: 'r16', label: 'R16' },
+  { value: 'qf', label: 'QF' },
+  { value: 'sf', label: 'SF' },
+  { value: 'final', label: 'Final' },
+]
+
 const STAGE_LABELS = {
   group: 'Group Stage',
   r32: 'Round of 32',
@@ -220,6 +230,7 @@ function buildMatches(rawGames) {
       isBedtime: hour <= BEDTIME_CUTOFF_HOUR && hour >= 6, // friendly: 6am–11:xx pm
       isLate: hour > BEDTIME_CUTOFF_HOUR || hour < 6, // 12am–5:59am = late/dawn
       stage: stageChip(g),
+      type: str(g.type).toLowerCase(), // group | r32 | r16 | qf | sf | third | final
       isKnockout: str(g.type).toLowerCase() !== 'group',
       home,
       away,
@@ -257,8 +268,138 @@ function todayKsaKey() {
 }
 
 /* ------------------------------------------------------------------ *
+ * Group standings
+ * ------------------------------------------------------------------ */
+
+// Build league tables from the raw games. Only finished group matches with
+// numeric scores contribute; teams are seeded so they appear before kickoff.
+// Returns [{ group: 'A', rows: [{name, p, w, d, l, gf, ga, gd, pts}] }].
+function buildStandings(rawGames) {
+  const games = Array.isArray(rawGames) ? rawGames : []
+  const groups = new Map() // group -> Map(teamName -> stats)
+
+  const ensure = (grp, name) => {
+    if (!groups.has(grp)) groups.set(grp, new Map())
+    const tbl = groups.get(grp)
+    if (!tbl.has(name)) {
+      tbl.set(name, { name, p: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, gd: 0, pts: 0 })
+    }
+    return tbl.get(name)
+  }
+
+  for (const g of games) {
+    if (str(g.type).toLowerCase() !== 'group') continue
+    const grp = str(g.group).toUpperCase()
+    if (!grp) continue
+    const home = str(g.home_team_name_en) || str(g.home_team_label)
+    const away = str(g.away_team_name_en) || str(g.away_team_label)
+    if (!home || !away) continue
+
+    // Seed both teams so the table is complete even before any match is played.
+    const hs = ensure(grp, home)
+    const as = ensure(grp, away)
+
+    const finished = str(g.finished).toLowerCase() === 'true'
+    const h = Number(g.home_score)
+    const a = Number(g.away_score)
+    if (!finished || !Number.isFinite(h) || !Number.isFinite(a)) continue
+
+    hs.p += 1; as.p += 1
+    hs.gf += h; hs.ga += a
+    as.gf += a; as.ga += h
+    if (h > a) { hs.w += 1; hs.pts += 3; as.l += 1 }
+    else if (h < a) { as.w += 1; as.pts += 3; hs.l += 1 }
+    else { hs.d += 1; as.d += 1; hs.pts += 1; as.pts += 1 }
+  }
+
+  const result = []
+  for (const [group, tbl] of groups) {
+    const rows = Array.from(tbl.values())
+    for (const r of rows) r.gd = r.gf - r.ga
+    rows.sort(
+      (x, y) =>
+        y.pts - x.pts || y.gd - x.gd || y.gf - x.gf || x.name.localeCompare(y.name),
+    )
+    result.push({ group, rows })
+  }
+  result.sort((x, y) => x.group.localeCompare(y.group))
+  return result
+}
+
+/* ------------------------------------------------------------------ *
  * Small UI pieces
  * ------------------------------------------------------------------ */
+
+// A compact league table for one group. Top 2 rows are tinted green (direct
+// qualifiers); 3rd is amber (possible best-third); 4th is muted.
+function StandingsTable({ group, rows }) {
+  return (
+    <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70">
+      <div className="flex items-center gap-2 border-b border-slate-800 px-3 py-2">
+        <span className="flex h-6 w-6 items-center justify-center rounded-md bg-gradient-to-br from-cyan-400 to-emerald-500 text-xs font-extrabold text-slate-950">
+          {group}
+        </span>
+        <span className="text-sm font-bold text-slate-200">Group {group}</span>
+      </div>
+
+      {/* Column header */}
+      <div className="flex items-center gap-1 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+        <span className="w-4 shrink-0 text-center">#</span>
+        <span className="min-w-0 flex-1">Team</span>
+        <span className="w-5 shrink-0 text-center">P</span>
+        <span className="w-7 shrink-0 text-center">GD</span>
+        <span className="w-7 shrink-0 text-center text-slate-300">Pts</span>
+      </div>
+
+      <div className="divide-y divide-slate-800/70">
+        {rows.map((r, i) => {
+          const pos = i + 1
+          const accent =
+            pos <= 2
+              ? 'border-l-2 border-emerald-400'
+              : pos === 3
+                ? 'border-l-2 border-amber-400/70'
+                : 'border-l-2 border-transparent'
+          return (
+            <div
+              key={r.name}
+              className={`flex items-center gap-1 py-2 pl-2 pr-3 ${accent}`}
+            >
+              <span
+                className={[
+                  'w-4 shrink-0 text-center text-xs font-bold',
+                  pos <= 2 ? 'text-emerald-300' : pos === 3 ? 'text-amber-300' : 'text-slate-500',
+                ].join(' ')}
+              >
+                {pos}
+              </span>
+              <span
+                className={[
+                  'min-w-0 flex-1 truncate text-sm',
+                  r.name.toLowerCase().includes('group') || r.name === 'TBD'
+                    ? 'italic text-slate-400'
+                    : 'font-semibold text-slate-100',
+                ].join(' ')}
+                title={r.name}
+              >
+                {r.name}
+              </span>
+              <span className="w-5 shrink-0 text-center text-xs tabular-nums text-slate-400">
+                {r.p}
+              </span>
+              <span className="w-7 shrink-0 text-center text-xs tabular-nums text-slate-300">
+                {r.gd > 0 ? `+${r.gd}` : r.gd}
+              </span>
+              <span className="w-7 shrink-0 text-center text-sm font-extrabold tabular-nums text-white">
+                {r.pts}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
 
 function StatusBadge({ status }) {
   if (status === 'live') {
@@ -598,6 +739,7 @@ export default function App() {
 
   const [bedtimeOnly, setBedtimeOnly] = useState(true)
   const [stageFilter, setStageFilter] = useState('all') // 'all' | 'group' | 'knockout'
+  const [koRound, setKoRound] = useState('all') // r32 | r16 | qf | sf | final | all
   const [selectedDate, setSelectedDate] = useState(null) // dateKey
   const activeChipRef = useRef(null)
 
@@ -634,14 +776,30 @@ export default function App() {
     [rawGames],
   )
 
+  // Group standings, recomputed when data changes.
+  const standings = useMemo(
+    () => (rawGames ? buildStandings(rawGames) : []),
+    [rawGames],
+  )
+
   // Apply the stage filter first, so the day strip only offers days that
   // actually have matches for the chosen stage (e.g. pick Knockouts and the
   // day tabs jump straight to the knockout days — no scrolling past groups).
+  // When a specific knockout round is selected, narrow to just that round.
   const stageMatches = useMemo(() => {
     if (stageFilter === 'group') return allMatches.filter((m) => !m.isKnockout)
-    if (stageFilter === 'knockout') return allMatches.filter((m) => m.isKnockout)
+    if (stageFilter === 'knockout') {
+      let ko = allMatches.filter((m) => m.isKnockout)
+      if (koRound !== 'all') {
+        // "Final" chip also surfaces the third-place play-off alongside it.
+        ko = ko.filter((m) =>
+          koRound === 'final' ? m.type === 'final' || m.type === 'third' : m.type === koRound,
+        )
+      }
+      return ko
+    }
     return allMatches
-  }, [allMatches, stageFilter])
+  }, [allMatches, stageFilter, koRound])
 
   // Day groups follow the stage filter (but not the bedtime toggle, so the
   // strip stays stable when you just hide late games).
@@ -683,21 +841,18 @@ export default function App() {
 
   /* ---- render ---- */
 
+  const isGroupsMode = stageFilter === 'group'
+  const isKnockoutMode = stageFilter === 'knockout'
+
   let body
   if (loading) {
     body = <LoadingState />
   } else if (error) {
     body = <ErrorState message={error} onRetry={() => fetchGames(true)} />
-  } else if (dayGroups.length === 0) {
-    body = (
-      <div className="px-6 py-16 text-center text-sm text-slate-400">
-        No fixtures available right now.
-      </div>
-    )
   } else {
     body = (
       <>
-        {/* Stage filter + day strip (stacked, sticky under the header) */}
+        {/* Sticky controls: stage chips, plus KO rounds or day strip */}
         <div className="sticky top-[118px] z-40 border-b border-slate-800/60 bg-slate-950/80 backdrop-blur-lg">
           <div className="mx-auto max-w-md">
             {/* Stage segmented control */}
@@ -706,7 +861,10 @@ export default function App() {
                 <button
                   key={t.value}
                   type="button"
-                  onClick={() => setStageFilter(t.value)}
+                  onClick={() => {
+                    setStageFilter(t.value)
+                    if (t.value !== 'knockout') setKoRound('all')
+                  }}
                   className={[
                     'min-h-[36px] flex-1 rounded-lg px-2 text-xs font-bold transition active:scale-95',
                     stageFilter === t.value
@@ -718,69 +876,120 @@ export default function App() {
                 </button>
               ))}
             </div>
-            {/* Day chips */}
-            <div className="flex gap-2 overflow-x-auto px-4 py-2.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-              {dayGroups.map((g) => (
-                <DayChip
-                  key={g.dateKey}
-                  group={g}
-                  isActive={g.dateKey === selectedDate}
-                  isToday={g.dateKey === todayKey}
-                  onClick={() => setSelectedDate(g.dateKey)}
-                  refCb={g.dateKey === selectedDate ? activeChipRef : null}
-                />
-              ))}
-            </div>
+
+            {/* Knockout round chips (only in Knockouts mode) */}
+            {isKnockoutMode && (
+              <div className="flex gap-1.5 overflow-x-auto px-4 pt-2 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                {KO_ROUNDS.map((r) => (
+                  <button
+                    key={r.value}
+                    type="button"
+                    onClick={() => setKoRound(r.value)}
+                    className={[
+                      'min-h-[32px] shrink-0 rounded-lg px-3 text-[11px] font-bold transition active:scale-95',
+                      koRound === r.value
+                        ? 'bg-indigo-500 text-white'
+                        : 'bg-slate-900/70 text-slate-400 ring-1 ring-inset ring-slate-800',
+                    ].join(' ')}
+                  >
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Day chips (hidden in Groups mode, which shows tables instead) */}
+            {!isGroupsMode && (
+              <div className="flex gap-2 overflow-x-auto px-4 py-2.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                {dayGroups.length === 0 ? (
+                  <span className="py-2 text-xs text-slate-500">No matches in this round.</span>
+                ) : (
+                  dayGroups.map((g) => (
+                    <DayChip
+                      key={g.dateKey}
+                      group={g}
+                      isActive={g.dateKey === selectedDate}
+                      isToday={g.dateKey === todayKey}
+                      onClick={() => setSelectedDate(g.dateKey)}
+                      refCb={g.dateKey === selectedDate ? activeChipRef : null}
+                    />
+                  ))
+                )}
+              </div>
+            )}
+            {isGroupsMode && <div className="pb-2.5" />}
           </div>
         </div>
 
-        {/* Selected day's matches */}
-        <div className="mx-auto max-w-md px-4 pt-4">
-          {selectedGroup && (
-            <div className="mb-3 flex items-center justify-between gap-2 px-0.5">
-              <div className="flex items-center gap-2">
-                <CalendarDays className="h-4 w-4 text-slate-500" />
-                <h2 className="text-sm font-bold text-slate-200">
-                  {selectedGroup.dateKey === todayKey
-                    ? 'Today'
-                    : `${selectedGroup.weekday}, ${selectedGroup.monthShort} ${selectedGroup.dayNum}`}
-                </h2>
+        {/* Body: standings tables (Groups) or match list (All / Knockouts) */}
+        {isGroupsMode ? (
+          <div className="mx-auto max-w-md px-4 pt-4">
+            {standings.length === 0 ? (
+              <div className="py-16 text-center text-sm text-slate-400">
+                No group data available.
               </div>
-              <span className="text-[11px] text-slate-500">
-                {visibleMatches.length}/{dayMatches.length} shown
-              </span>
-            </div>
-          )}
+            ) : (
+              <div className="space-y-4">
+                {standings.map((s) => (
+                  <StandingsTable key={s.group} group={s.group} rows={s.rows} />
+                ))}
+              </div>
+            )}
+            <p className="pb-8 pt-5 text-center text-[11px] text-slate-600">
+              Top 2 of each group advance · plus best 3rd-placed teams
+            </p>
+          </div>
+        ) : (
+          <div className="mx-auto max-w-md px-4 pt-4">
+            {selectedGroup && (
+              <div className="mb-3 flex items-center justify-between gap-2 px-0.5">
+                <div className="flex items-center gap-2">
+                  <CalendarDays className="h-4 w-4 text-slate-500" />
+                  <h2 className="text-sm font-bold text-slate-200">
+                    {selectedGroup.dateKey === todayKey
+                      ? 'Today'
+                      : `${selectedGroup.weekday}, ${selectedGroup.monthShort} ${selectedGroup.dayNum}`}
+                  </h2>
+                </div>
+                <span className="text-[11px] text-slate-500">
+                  {visibleMatches.length}/{dayMatches.length} shown
+                </span>
+              </div>
+            )}
 
-          {visibleMatches.length === 0 ? (
-            <EmptyDayState
-              hiddenLate={hiddenLateCount}
-              onShowLate={() => setBedtimeOnly(false)}
-            />
-          ) : (
-            <div className="space-y-3">
-              {visibleMatches.map((m) => (
-                <MatchCard key={m.id} match={m} />
-              ))}
-            </div>
-          )}
+            {dayGroups.length === 0 ? (
+              <div className="py-16 text-center text-sm text-slate-400">
+                No matches in this round.
+              </div>
+            ) : visibleMatches.length === 0 ? (
+              <EmptyDayState
+                hiddenLate={hiddenLateCount}
+                onShowLate={() => setBedtimeOnly(false)}
+              />
+            ) : (
+              <div className="space-y-3">
+                {visibleMatches.map((m) => (
+                  <MatchCard key={m.id} match={m} />
+                ))}
+              </div>
+            )}
 
-          {/* When filtering, hint how many late games are tucked away */}
-          {bedtimeOnly && hiddenLateCount > 0 && visibleMatches.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setBedtimeOnly(false)}
-              className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 text-xs font-semibold text-slate-400 transition active:scale-[0.99]"
-            >
-              <EyeOff className="h-3.5 w-3.5" />
-              +{hiddenLateCount} late
-            </button>
-          )}
+            {bedtimeOnly && hiddenLateCount > 0 && visibleMatches.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setBedtimeOnly(false)}
+                className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 text-xs font-semibold text-slate-400 transition active:scale-[0.99]"
+              >
+                <EyeOff className="h-3.5 w-3.5" />
+                +{hiddenLateCount} late
+              </button>
+            )}
 
-          <p className="pb-8 pt-5 text-center text-[11px] text-slate-600">
-            Times in KSA (GMT+3)
-          </p>
-        </div>
+            <p className="pb-8 pt-5 text-center text-[11px] text-slate-600">
+              Times in KSA (GMT+3)
+            </p>
+          </div>
+        )}
       </>
     )
   }
