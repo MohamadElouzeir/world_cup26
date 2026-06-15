@@ -13,6 +13,8 @@ import {
   EyeOff,
   Sparkles,
   BellPlus,
+  ChevronDown,
+  Goal,
 } from 'lucide-react'
 
 /* ------------------------------------------------------------------ *
@@ -20,6 +22,7 @@ import {
  * ------------------------------------------------------------------ */
 
 const API_URL = 'https://worldcup26.ir/get/games'
+const TEAMS_URL = 'https://worldcup26.ir/get/teams'
 
 // Kickoffs up to and including this KSA hour count as "friendly" (i.e. before
 // midnight). 23 = 11 PM, so anything from 00:00 (midnight) onward is "late".
@@ -167,12 +170,14 @@ function str(v) {
   return s
 }
 
-function resolveTeam(game, side) {
+function resolveTeam(game, side, flagMap) {
   const name = str(game[`${side}_team_name_en`])
-  if (name) return { name, isPlaceholder: false }
+  if (name) {
+    return { name, isPlaceholder: false, flag: (flagMap && flagMap[name]) || '' }
+  }
   const label = str(game[`${side}_team_label`])
-  if (label) return { name: label, isPlaceholder: true }
-  return { name: 'TBD', isPlaceholder: true }
+  if (label) return { name: label, isPlaceholder: true, flag: '' }
+  return { name: 'TBD', isPlaceholder: true, flag: '' }
 }
 
 function stageChip(game) {
@@ -182,6 +187,20 @@ function stageChip(game) {
     return g ? `Group ${g.toUpperCase()}` : 'Group Stage'
   }
   return STAGE_LABELS[type] || str(game.group) || 'Knockout'
+}
+
+// Parse a scorer blob like {"J. Quiñones 9'","R. Jiménez 67'"} into a list of
+// names+minutes. The feed mixes curly “” and straight "" quotes, so we pull
+// any quoted token; fall back to comma-splitting if there are no quotes.
+function parseScorers(raw) {
+  const s = str(raw)
+  if (!s || s === '{}') return []
+  const inner = s.replace(/^\{/, '').replace(/\}$/, '')
+  const quoted = inner.match(/[“"]([^”"]+)[”"]/g)
+  const list = quoted
+    ? quoted.map((t) => t.replace(/[“”"]/g, '').trim())
+    : inner.split(',').map((t) => t.replace(/[“”"]/g, '').trim())
+  return list.filter(Boolean)
 }
 
 function deriveStatus(game) {
@@ -196,7 +215,7 @@ function deriveStatus(game) {
  * View-model builder
  * ------------------------------------------------------------------ */
 
-function buildMatches(rawGames) {
+function buildMatches(rawGames, flagMap) {
   const games = Array.isArray(rawGames) ? rawGames : []
   const out = []
 
@@ -216,8 +235,8 @@ function buildMatches(rawGames) {
     )
 
     const hour = ksaHour24(utc)
-    const home = resolveTeam(g, 'home')
-    const away = resolveTeam(g, 'away')
+    const home = resolveTeam(g, 'home', flagMap)
+    const away = resolveTeam(g, 'away', flagMap)
 
     out.push({
       id: str(g.id) || str(g._id) || `${utc.getTime()}-${home.name}`,
@@ -237,6 +256,8 @@ function buildMatches(rawGames) {
       away,
       homeScore: str(g.home_score),
       awayScore: str(g.away_score),
+      homeScorers: parseScorers(g.home_scorers),
+      awayScorers: parseScorers(g.away_scorers),
       status: deriveStatus(g),
     })
   }
@@ -491,17 +512,29 @@ function StatusBadge({ status }) {
 function TeamRow({ team, score, showScore, isWinner }) {
   return (
     <div className="flex min-w-0 items-center justify-between gap-3 py-1.5">
-      <span
-        className={[
-          'min-w-0 truncate text-sm',
-          team.isPlaceholder
-            ? 'italic text-slate-400'
-            : 'font-semibold text-slate-100',
-          isWinner ? 'text-white' : '',
-        ].join(' ')}
-        title={team.name}
-      >
-        {team.name}
+      <span className="flex min-w-0 items-center gap-2">
+        {team.flag ? (
+          <img
+            src={team.flag}
+            alt=""
+            loading="lazy"
+            className="h-3.5 w-5 shrink-0 rounded-sm object-cover ring-1 ring-slate-700"
+          />
+        ) : (
+          <span className="h-3.5 w-5 shrink-0 rounded-sm bg-slate-800 ring-1 ring-slate-700" />
+        )}
+        <span
+          className={[
+            'min-w-0 truncate text-sm',
+            team.isPlaceholder
+              ? 'italic text-slate-400'
+              : 'font-semibold text-slate-100',
+            isWinner ? 'text-white' : '',
+          ].join(' ')}
+          title={team.name}
+        >
+          {team.name}
+        </span>
       </span>
       {showScore ? (
         <span
@@ -517,7 +550,24 @@ function TeamRow({ team, score, showScore, isWinner }) {
   )
 }
 
+// One scorer line: "J. Quiñones 9'".
+function ScorerLine({ text, align }) {
+  return (
+    <div
+      className={[
+        'flex items-center gap-1.5 text-[11px] text-slate-300',
+        align === 'right' ? 'flex-row-reverse text-right' : '',
+      ].join(' ')}
+    >
+      <Goal className="h-3 w-3 shrink-0 text-slate-500" />
+      <span className="min-w-0 truncate">{text}</span>
+    </div>
+  )
+}
+
 function MatchCard({ match }) {
+  const [open, setOpen] = useState(false)
+
   const isFinished = match.status === 'finished'
   const showScore = isFinished || match.status === 'live'
 
@@ -532,14 +582,22 @@ function MatchCard({ match }) {
     }
   }
 
+  const hasScorers =
+    match.homeScorers.length > 0 || match.awayScorers.length > 0
+  // The card only expands when there's extra detail to reveal.
+  const expandable = hasScorers
+  const toggle = () => expandable && setOpen((v) => !v)
+
   return (
     <article
       className={[
-        'rounded-2xl border p-3.5 shadow-lg shadow-black/20 transition-colors active:bg-slate-800/70',
+        'rounded-2xl border p-3.5 shadow-lg shadow-black/20 transition-colors',
         match.isLate
           ? 'border-slate-800/70 bg-slate-900/40'
           : 'border-slate-700/80 bg-slate-900/80',
+        expandable ? 'cursor-pointer active:bg-slate-800/70' : '',
       ].join(' ')}
+      onClick={toggle}
     >
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="inline-flex items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-slate-400">
@@ -578,25 +636,51 @@ function MatchCard({ match }) {
           </span>
         </span>
 
-        {match.isLate ? (
-          <span className="inline-flex items-center gap-1 rounded-md bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-300 ring-1 ring-inset ring-indigo-500/25">
-            <Moon className="h-3 w-3" />
-            Late
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-300 ring-1 ring-inset ring-emerald-500/25">
-            <BedDouble className="h-3 w-3" />
-            OK
-          </span>
-        )}
+        <span className="flex items-center gap-1.5">
+          {match.isLate ? (
+            <span className="inline-flex items-center gap-1 rounded-md bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-300 ring-1 ring-inset ring-indigo-500/25">
+              <Moon className="h-3 w-3" />
+              Late
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-300 ring-1 ring-inset ring-emerald-500/25">
+              <BedDouble className="h-3 w-3" />
+              OK
+            </span>
+          )}
+          {expandable && (
+            <ChevronDown
+              className={`h-4 w-4 text-slate-500 transition-transform ${open ? 'rotate-180' : ''}`}
+            />
+          )}
+        </span>
       </div>
 
-      {/* Reminder — only useful for matches that haven't started. Adds a
-          calendar event with a 15-min alert to the phone's own Calendar. */}
+      {/* Expanded detail: goalscorers (revealed on tap). */}
+      {open && hasScorers && (
+        <div className="mt-2.5 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-slate-800 pt-2.5">
+          <div className="space-y-1">
+            {match.homeScorers.map((s, i) => (
+              <ScorerLine key={`h-${i}`} text={s} align="left" />
+            ))}
+          </div>
+          <div className="space-y-1">
+            {match.awayScorers.map((s, i) => (
+              <ScorerLine key={`a-${i}`} text={s} align="right" />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Reminder — only for matches that haven't started. stopPropagation so
+          tapping it doesn't also toggle the card. */}
       {match.status === 'upcoming' && (
         <button
           type="button"
-          onClick={() => addMatchReminder(match)}
+          onClick={(e) => {
+            e.stopPropagation()
+            addMatchReminder(match)
+          }}
           className="mt-2.5 flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-800/60 text-xs font-bold text-slate-200 transition active:scale-[0.99] active:bg-slate-700"
         >
           <BellPlus className="h-4 w-4 text-cyan-300" />
@@ -809,6 +893,7 @@ function Header({ onRefresh, refreshing, lastUpdated, bedtimeOnly, onToggleBedti
 
 export default function App() {
   const [rawGames, setRawGames] = useState(null)
+  const [rawTeams, setRawTeams] = useState(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState(null)
@@ -835,6 +920,20 @@ export default function App() {
       setLastUpdated(
         new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
       )
+
+      // Teams (for flags) are a best-effort enhancement — never block or fail
+      // the app if this request errors; matches still render without flags.
+      try {
+        const tRes = await fetch(TEAMS_URL, {
+          headers: { Accept: 'application/json' },
+        })
+        if (tRes.ok) {
+          const tData = await tRes.json()
+          setRawTeams(Array.isArray(tData?.teams) ? tData.teams : null)
+        }
+      } catch {
+        /* ignore — flags optional */
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
@@ -847,10 +946,22 @@ export default function App() {
     fetchGames(false)
   }, [fetchGames])
 
+  // name_en -> flag URL lookup, built from the teams endpoint (optional).
+  const flagMap = useMemo(() => {
+    if (!Array.isArray(rawTeams)) return {}
+    const map = {}
+    for (const t of rawTeams) {
+      const name = str(t?.name_en)
+      const flag = str(t?.flag)
+      if (name && flag) map[name] = flag
+    }
+    return map
+  }, [rawTeams])
+
   // All matches (correct KSA), sorted.
   const allMatches = useMemo(
-    () => (rawGames ? buildMatches(rawGames) : []),
-    [rawGames],
+    () => (rawGames ? buildMatches(rawGames, flagMap) : []),
+    [rawGames, flagMap],
   )
 
   // Group standings, recomputed when data changes.
